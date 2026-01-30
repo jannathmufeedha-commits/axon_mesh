@@ -1,12 +1,16 @@
 name: axon_mesh
-description: A new Flutter project.
-version: 1.0.0+1
-environment:
-  sdk: '>=3.0.0 <4.0.0'
+version: 1.0.0
+
 dependencies:
   flutter:
     sdk: flutter
-  flutter_p2p_connection: ^2.0.2
-  permission_handler: ^11.3.1
+  flutter_p2p_connection: ^1.0.0
+  permission_handler: ^10.0.0
+  crypto: ^3.0.0
+
+# Additional dependencies for Axon Mesh V4
+# Add any other dependencies here
+
+# Flutter application settings
 flutter:
   uses-material-design: true
