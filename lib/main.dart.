@@ -1,0 +1,194 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_p2p_connection/flutter_p2p_connection.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'dart:async';
+import 'dart:io';
+import 'dart:convert';
+import 'dart:typed_data';
+import 'dart:collection';
+
+void main() => runApp(const AxonMasterApp());
+
+class AxonMasterApp extends StatelessWidget {
+  const AxonMasterApp({super.key});
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+    debugShowCheckedModeBanner: false,
+    theme: ThemeData.dark(),
+    home: const AxonProEngine(),
+  );
+}
+
+class AxonProEngine extends StatefulWidget {
+  const AxonProEngine({super.key});
+  @override
+  State<AxonProEngine> createState() => _AxonProEngineState();
+}
+
+class _AxonProEngineState extends State<AxonProEngine> {
+  final _p2p = FlutterP2pConnection();
+  
+  // NODE MANAGEMENT: Stores active phone connections
+  final HashMap<String, Socket> _nodeRegistry = HashMap();
+  
+  // PACKET QUEUE: Processes data without loss
+  final Queue<Map<String, dynamic>> _packetQueue = Queue();
+  
+  // DUPLICATE FILTER: Prevents the same message from looping
+  final Set<String> _duplicateFilter = {};
+  
+  String _engineStatus = "SYSTEM_READY";
+  bool _isProcessing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _p2p.initialize();
+    _requestPermissions(); // Requests permissions at app startup
+  }
+
+  Future<void> _requestPermissions() async {
+    await [
+      Permission.location,
+      Permission.nearbyWifiDevices,
+      Permission.bluetoothConnect,
+      Permission.bluetoothScan,
+    ].request();
+  }
+
+  // Function to start the MESH engine
+  Future<void> launchEngine() async {
+    try {
+      bool groupCreated = await _p2p.createGroup();
+      if (groupCreated) {
+        _initializeServer();
+      } else {
+        setState(() => _engineStatus = "SCANNING_MESH...");
+        _p2p.discover();
+        _p2p.streamWifiP2PInfo().listen((info) {
+          if (info.isConnected && !info.isGroupOwner) {
+            _connectToMeshHub(info.groupOwnerAddress);
+          }
+        });
+      }
+    } catch (e) {
+      _logError("Boot Failure", e);
+    }
+  }
+
+  void _initializeServer() async {
+    ServerSocket server = await ServerSocket.bind(InternetAddress.anyIPv4, 8888);
+    server.listen((client) => _registerNode(client));
+    setState(() => _engineStatus = "MESH_ROOT_ACTIVE");
+  }
+
+  void _connectToMeshHub(String address) async {
+    try {
+      Socket s = await Socket.connect(address, 8888);
+      _registerNode(s);
+    } catch (e) { _logError("Mesh Connect Fail", e); }
+  }
+
+  void _registerNode(Socket socket) {
+    String nodeAddress = socket.remoteAddress.address;
+    _nodeRegistry[nodeAddress] = socket;
+    
+    socket.listen(
+      (data) => _inboundHandler(data, socket),
+      onDone: () => _dropNode(nodeAddress),
+      onError: (e) => _dropNode(nodeAddress),
+      cancelOnError: true,
+    );
+    setState(() => _engineStatus = "ACTIVE_NODES: ${_nodeRegistry.length}");
+  }
+
+  // Handles incoming messages
+  void _inboundHandler(Uint8List rawData, Socket sender) {
+    try {
+      final packet = jsonDecode(utf8.decode(rawData));
+      
+      // Checks if it is a duplicate packet
+      if (_duplicateFilter.contains(packet['pId'])) return;
+      _duplicateFilter.add(packet['pId']);
+
+      // Adds to queue
+      _packetQueue.add(packet);
+      if (!_isProcessing) _processQueue(sender);
+    } catch (e) { _logError("Inbound Error", e); }
+  }
+
+  // Multi-hop Relay Logic: Forwards messages to other phones
+  Future<void> _processQueue(Socket source) async {
+    _isProcessing = true;
+    while (_packetQueue.isNotEmpty) {
+      final currentPacket = _packetQueue.removeFirst();
+      final raw = utf8.encode(jsonEncode(currentPacket));
+      
+      // Sends to all nodes except the sender
+      _nodeRegistry.forEach((address, socket) {
+        if (socket != source) socket.add(raw);
+      });
+    }
+    _isProcessing = false;
+    setState(() {});
+  }
+
+  void _dropNode(String address) {
+    _nodeRegistry.remove(address);
+    setState(() => _engineStatus = "NODE_LOST: $address");
+  }
+
+  void _logError(String ctx, dynamic e) => setState(() => _engineStatus = "ERR: $ctx");
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        title: const Text("AXON MESH V3 PRO"),
+        backgroundColor: Colors.blueGrey[900],
+      ),
+      body: Column(
+        children: [
+          _buildStatusPanel(),
+          Expanded(child: _buildNodeList()),
+          _buildControlPanel(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatusPanel() => Container(
+    padding: const EdgeInsets.all(12),
+    width: double.infinity,
+    color: Colors.cyanAccent.withOpacity(0.1),
+    child: Row(
+      children: [
+        const Icon(Icons.radar, color: Colors.cyanAccent),
+        const SizedBox(width: 10),
+        Text("SYSTEM: $_engineStatus", style: const TextStyle(color: Colors.cyanAccent)),
+      ],
+    ),
+  );
+
+  Widget _buildNodeList() => ListView(
+    children: _nodeRegistry.keys.map((addr) => ListTile(
+      leading: const Icon(Icons.hub, color: Colors.greenAccent),
+      title: Text("Connected Node: $addr"),
+      subtitle: const Text("Hop-Relay Ready", style: TextStyle(fontSize: 10, color: Colors.white24)),
+    )).toList(),
+  );
+
+  Widget _buildControlPanel() => Padding(
+    padding: const EdgeInsets.all(25.0),
+    child: ElevatedButton(
+      style: ElevatedButton.styleFrom(
+        backgroundColor: Colors.cyanAccent,
+        foregroundColor: Colors.black,
+        minimumSize: const Size(double.infinity, 50),
+      ),
+      onPressed: launchEngine, 
+      child: const Text("ACTIVATE MESH ENGINE", style: TextStyle(fontWeight: FontWeight.bold)),
+    ),
+  );
+}
